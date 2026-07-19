@@ -16,6 +16,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Stats = game:GetService("Stats")
 local Debris = game:GetService("Debris")
 local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local Settings = {
     KnifeAura = false,
@@ -36,9 +37,9 @@ local Settings = {
     PickupDepth = 4.5,
     Defense = false,
     AxeAura = false,
-    TargetNames = "",
-    Whitelist = "",
-    FriendList = "",
+    TargetNames = {},
+    WhitelistNames = {},
+    FriendNames = {},
     PlatformSpeed = 9999,
     FallProtect = true,
     AutoHeal = true,
@@ -54,11 +55,8 @@ local Settings = {
     VomitMultiListTable = {"BcT", "866", "Ez"},
 }
 
-local TargetPatterns = {}
-local WhitelistPatterns = {}
-local FriendPatterns = {}
+local currentTargets = {}
 local tpConnection = nil
-local currentTarget = nil
 local fetchingKnife = false
 local fetchingAxe = false
 local lastTPTime = 0
@@ -72,67 +70,36 @@ local vomitRunning = false
 local vomitTrackingHistory = {}
 local vomitAllIndex = 1
 local vomitListIndex = 1
+local defending = false
+local defenseThread = nil
+
+local function startDefense()
+    if defending then return end
+    defending = true
+    defenseThread = task.spawn(function()
+        while defending do
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(true, "R", false, game)
+            end)
+            task.wait()
+        end
+    end)
+end
+
+local function stopDefense()
+    defending = false
+    if defenseThread then
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false, "R", false, game)
+        end)
+        defenseThread = nil
+    end
+end
 
 local function getPing()
     local ping = 0.05
     pcall(function() ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000 end)
     return ping
-end
-
-local function matchName(pName, search)
-    if not search or search == "" then return false end
-    return string.find(string.lower(pName), search, 1, true) ~= nil
-end
-
-local function parseList(str)
-    local list = {}
-    if not str or str == "" then return list end
-    for name in string.gmatch(str, "([^,，]+)") do
-        local clean = name:gsub("%s+", ""):lower()
-        if clean ~= "" then table.insert(list, clean) end
-    end
-    return list
-end
-
-local function updateTargets()
-    TargetPatterns = parseList(Settings.TargetNames)
-end
-
-local function updateWhitelist()
-    WhitelistPatterns = parseList(Settings.Whitelist)
-end
-
-local function updateFriends()
-    FriendPatterns = parseList(Settings.FriendList)
-end
-
-local function isFriend(ply)
-    if not ply then return false end
-    if ply:IsFriendsWith(LocalPlayer.UserId) then return true end
-    for _, p in ipairs(FriendPatterns) do
-        if matchName(ply.Name, p) or matchName(ply.DisplayName, p) then return true end
-    end
-    return false
-end
-
-local function isWhitelisted(ply)
-    if not ply then return false end
-    if isFriend(ply) then return true end
-    for _, p in ipairs(WhitelistPatterns) do
-        if matchName(ply.Name, p) or matchName(ply.DisplayName, p) then return true end
-    end
-    return false
-end
-
-local function isTarget(ply)
-    if not ply or ply == LocalPlayer then return false end
-    if isWhitelisted(ply) then return false end
-    if Settings.AttackAll then return true end
-    if #TargetPatterns == 0 then return false end
-    for _, p in ipairs(TargetPatterns) do
-        if matchName(ply.Name, p) or matchName(ply.DisplayName, p) then return true end
-    end
-    return false
 end
 
 local function updateAllPlayers()
@@ -143,10 +110,45 @@ local function updateAllPlayers()
     allPlayers = list
 end
 
+local function getPlayerNames()
+    local names = {}
+    for _, ply in ipairs(allPlayers) do table.insert(names, ply.Name) end
+    return names
+end
+
+local function isFriend(ply)
+    if not ply then return false end
+    if ply:IsFriendsWith(LocalPlayer.UserId) then return true end
+    for _, name in ipairs(Settings.FriendNames) do
+        if ply.Name == name or ply.DisplayName == name then return true end
+    end
+    return false
+end
+
+local function isWhitelisted(ply)
+    if not ply then return false end
+    if isFriend(ply) then return true end
+    for _, name in ipairs(Settings.WhitelistNames) do
+        if ply.Name == name or ply.DisplayName == name then return true end
+    end
+    return false
+end
+
+local function isTarget(ply)
+    if not ply or ply == LocalPlayer then return false end
+    if isWhitelisted(ply) then return false end
+    if Settings.AttackAll then return true end
+    if #Settings.TargetNames == 0 then return false end
+    for _, name in ipairs(Settings.TargetNames) do
+        if ply.Name == name or ply.DisplayName == name then return true end
+    end
+    return false
+end
+
 local function getValidTargets()
     local valid = {}
     for _, ply in ipairs(allPlayers) do
-        if isTarget(ply) then
+        if isTarget(ply) and not isWhitelisted(ply) then
             local char = ply.Character
             local root = char and char:FindFirstChild("HumanoidRootPart")
             local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -168,13 +170,24 @@ local function targetValid(ply)
     return true
 end
 
+local function cleanTargetList()
+    local cleaned = {}
+    for _, t in ipairs(currentTargets) do
+        if targetValid(t) then table.insert(cleaned, t) end
+    end
+    currentTargets = cleaned
+end
+
 local function getNextTarget()
     local targets = getValidTargets()
     if #targets == 0 then return nil end
-    if currentTarget and targetValid(currentTarget) then return currentTarget end
+    cleanTargetList()
+    if #currentTargets > 0 then return currentTargets[1] end
     rotIndex = rotIndex + 1
     if rotIndex > #targets then rotIndex = 1 end
-    return targets[rotIndex]
+    local newTarget = targets[rotIndex]
+    table.insert(currentTargets, newTarget)
+    return newTarget
 end
 
 local function clearCameraProxy()
@@ -197,7 +210,6 @@ local function getPlatform()
     SafePlatform.Anchored = true
     SafePlatform.CanCollide = true
     SafePlatform.Material = Enum.Material.SmoothPlastic
-    SafePlatform.Color = Color3.fromRGB(30, 35, 45)
     SafePlatform.Transparency = 0.3
     SafePlatform.Parent = Workspace
     return SafePlatform
@@ -259,8 +271,7 @@ local function fetchKnife()
         pcall(function()
             local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
             local root = char:WaitForChild("HumanoidRootPart")
-            local found = nil
-            local orig = root.CFrame
+            local found, orig = nil, root.CFrame
             for _, obj in pairs(Workspace:GetDescendants()) do
                 if string.lower(obj.Name) == "knife" then found = obj; break end
             end
@@ -293,8 +304,7 @@ local function fetchAxe()
         pcall(function()
             local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
             local root = char:WaitForChild("HumanoidRootPart")
-            local found = nil
-            local orig = root.CFrame
+            local found, orig = nil, root.CFrame
             for _, obj in pairs(Workspace:GetDescendants()) do
                 if string.lower(obj.Name) == "fire axe" then
                     if not Players:GetPlayerFromCharacter(obj.Parent) then found = obj; break end
@@ -321,18 +331,6 @@ local function fetchAxe()
         fetchingAxe = false
     end)
 end
-
-task.spawn(function()
-    while true do
-        if Settings.Defense then
-            pcall(function()
-                local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-                if remotes and remotes:FindFirstChild("Swing") then remotes.Swing:FireServer("Block") end
-            end)
-            task.wait(Settings.AntiLag and 0.12 or 0.03)
-        else task.wait(0.2) end
-    end
-end)
 
 local function getClosestForAura()
     local char = LocalPlayer.Character
@@ -443,31 +441,21 @@ local function tpLoop(dt)
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not root or not hum then return end
     if hum.Health <= 0 then return end
-
-    if Settings.AutoHeal and hum.Health < 100 then
-        doHeal(root)
-        return
-    end
-
+    if Settings.AutoHeal and hum.Health < 100 then doHeal(root); return end
     if Settings.AntiLag then
         local now = tick()
         if now - lastTPTime < 0.08 then return end
         lastTPTime = now
     end
     pcall(function()
-        if Settings.AutoKnife and not hasKnife() then
-            local dropped = findKnife()
-            if dropped then resetCamera(); fetchKnife(); return end
-        end
-        if Settings.AutoAxe and not hasAxe() then
-            local dropped = findAxe()
-            if dropped then resetCamera(); fetchAxe(); return end
-        end
-        if not targetValid(currentTarget) then currentTarget = getNextTarget() end
+        if Settings.AutoKnife and not hasKnife() then local dropped = findKnife(); if dropped then resetCamera(); fetchKnife(); return end end
+        if Settings.AutoAxe and not hasAxe() then local dropped = findAxe(); if dropped then resetCamera(); fetchAxe(); return end end
+        cleanTargetList()
+        if #currentTargets == 0 then local newTarget = getNextTarget(); if newTarget then currentTargets = {newTarget} end end
+        local currentTarget = #currentTargets > 0 and currentTargets[1] or nil
         if not currentTarget then
             local platform = getPlatform()
-            local speedFactor = Settings.PlatformSpeed / 200
-            local timer = tick() * speedFactor
+            local timer = tick() * (Settings.PlatformSpeed / 200)
             local center = Vector3.new(300000, 15000, 300000)
             local offset = Vector3.new(math.sin(timer) * 1500, 0, math.cos(timer * 0.7) * 1500)
             platform.CFrame = CFrame.new(center + offset)
@@ -484,15 +472,9 @@ local function tpLoop(dt)
         if tHum and tRoot and cam then
             if Settings.AntiShake then
                 if not CameraProxy or not CameraProxy.Parent then
-                    CameraProxy = Instance.new("Part")
-                    CameraProxy.Name = "CamProxy"
-                    CameraProxy.Size = Vector3.new(0.1, 0.1, 0.1)
-                    CameraProxy.Transparency = 1
-                    CameraProxy.CanCollide = false
-                    CameraProxy.CanTouch = false
-                    CameraProxy.CanQuery = false
-                    CameraProxy.Anchored = true
-                    CameraProxy.Parent = Workspace
+                    CameraProxy = Instance.new("Part"); CameraProxy.Name = "CamProxy"; CameraProxy.Size = Vector3.new(0.1, 0.1, 0.1)
+                    CameraProxy.Transparency = 1; CameraProxy.CanCollide = false; CameraProxy.CanTouch = false
+                    CameraProxy.CanQuery = false; CameraProxy.Anchored = true; CameraProxy.Parent = Workspace
                     CameraProxy.Position = tRoot.Position
                 end
                 if (CameraProxy.Position - tRoot.Position).Magnitude > 50 then CameraProxy.Position = tRoot.Position
@@ -504,26 +486,23 @@ local function tpLoop(dt)
         local tPos = tRoot.Position
         local tVel = Vector3.new(0, 0, 0)
         pcall(function() tVel = tRoot.AssemblyLinearVelocity or tRoot.Velocity end)
-        local lookDir = tRoot.CFrame.LookVector
         local predicted = tPos
         if Settings.Prediction then
-            local ping = getPing()
-            local clamped = math.clamp(ping, 0.01, 0.35)
+            local clamped = math.clamp(getPing(), 0.01, 0.35)
             predicted = tPos + (tVel * clamped)
             if math.abs(tVel.Y) > 0.5 then predicted = predicted + Vector3.new(0, tVel.Y * clamped * 1.15, 0) end
         end
         local dest = predicted
-        local offDir = Vector3.new(0, 0, 0)
         local step = 3.5
         if Settings.ActionMode == "Front" then
-            if tVel.Magnitude > 1.5 then offDir = tVel.Unit else offDir = lookDir end
+            local offDir = tVel.Magnitude > 1.5 and tVel.Unit or tRoot.CFrame.LookVector
             dest = predicted + (offDir * step) + Vector3.new(0, 0.4, 0)
         elseif Settings.ActionMode == "Behind" then
-            if tVel.Magnitude > 1.5 then offDir = -tVel.Unit else offDir = -lookDir end
+            local offDir = tVel.Magnitude > 1.5 and -tVel.Unit or -tRoot.CFrame.LookVector
             dest = predicted + (offDir * step) + Vector3.new(0, 0.4, 0)
         elseif Settings.ActionMode == "Rotate" then
             local angle = tick() * (Settings.RotateSpeed / 10)
-            offDir = Vector3.new(math.cos(angle), 0, math.sin(angle))
+            local offDir = Vector3.new(math.cos(angle), 0, math.sin(angle))
             dest = predicted + (offDir * step) + Vector3.new(0, 0.4, 0)
         elseif Settings.ActionMode == "UnderFoot" then
             dest = predicted - Vector3.new(0, 3.2, 0)
@@ -534,34 +513,23 @@ local function tpLoop(dt)
             if Settings.ActionMode == "UnderFoot" then return CFrame.new(pos) * CFrame.Angles(math.rad(90), 0, 0)
             else return CFrame.new(pos, lookAt) end
         end
-        if Settings.TPMode == "Instant" then
-            root.CFrame = getCFrame(dest)
-            root.Velocity = Vector3.new(0, 0, 0)
-            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        else
+        root.CFrame = getCFrame(dest)
+        root.Velocity = Vector3.new(0, 0, 0)
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        if Settings.TPMode == "Smooth" then
             local curPos = root.Position
             local dir = (dest - curPos)
-            local dist = dir.Magnitude
-            if dist > 1 then
-                local stepSize = math.min(Settings.SmoothSpeed * (dt * 60), dist)
-                if dist > 100 then stepSize = dist * 0.5 end
-                local nextPos = curPos + dir.Unit * stepSize
-                root.CFrame = getCFrame(nextPos)
-                root.Velocity = Vector3.new(0, 0, 0)
-                root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            else
-                root.CFrame = getCFrame(dest)
-                root.Velocity = Vector3.new(0, 0, 0)
-                root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            if dir.Magnitude > 1 then
+                local stepSize = math.min(Settings.SmoothSpeed * (dt * 60), dir.Magnitude)
+                if dir.Magnitude > 100 then stepSize = dir.Magnitude * 0.5 end
+                root.CFrame = getCFrame(curPos + dir.Unit * stepSize)
             end
         end
         if Settings.FallProtect then
             local floor = Instance.new("Part")
             floor.Size = Vector3.new(4, 0.2, 4)
             floor.CFrame = CFrame.new(root.Position - Vector3.new(0, 3, 0))
-            floor.Anchored = true
-            floor.Transparency = 1
-            floor.CanCollide = true
+            floor.Anchored = true; floor.Transparency = 1; floor.CanCollide = true
             floor.Parent = Workspace
             Debris:AddItem(floor, 0.15)
         end
@@ -574,7 +542,7 @@ local function toggleTP(state)
         if not tpConnection then tpConnection = RunService.Heartbeat:Connect(tpLoop) end
     else
         if tpConnection then tpConnection:Disconnect(); tpConnection = nil end
-        currentTarget = nil
+        currentTargets = {}
         destroyPlatform()
         resetCamera()
     end
@@ -582,14 +550,11 @@ end
 
 local function Teleport(targetCFrame)
     local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
-    char.HumanoidRootPart.CFrame = targetCFrame
+    if char and char:FindFirstChild("HumanoidRootPart") then char.HumanoidRootPart.CFrame = targetCFrame end
 end
 
 local function SetCameraSubject(targetHumanoid)
-    if targetHumanoid and targetHumanoid:IsA("Humanoid") then
-        Workspace.CurrentCamera.CameraSubject = targetHumanoid
-    end
+    if targetHumanoid and targetHumanoid:IsA("Humanoid") then Workspace.CurrentCamera.CameraSubject = targetHumanoid end
 end
 
 local function ParseVomitMultiList(text)
@@ -607,9 +572,7 @@ local function FindPlayerByPartialName(namePart)
     namePart = string.lower(namePart)
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then
-            if string.find(string.lower(p.Name), namePart) or string.find(string.lower(p.DisplayName), namePart) then
-                return p
-            end
+            if string.find(string.lower(p.Name), namePart) or string.find(string.lower(p.DisplayName), namePart) then return p end
         end
     end
     return nil
@@ -618,16 +581,15 @@ end
 local function FindAndEatSandwich()
     local char = LocalPlayer.Character
     if not char or not char:FindFirstChild("HumanoidRootPart") then return false end
-    local rootPart = char.HumanoidRootPart
     for _, obj in pairs(Workspace:GetDescendants()) do
         if string.lower(obj.Name) == "turkey sandwich" then
-            local targetCFrame = nil
-            if obj:IsA("Model") and obj.PrimaryPart then targetCFrame = obj.PrimaryPart.CFrame
-            elseif obj:IsA("BasePart") then targetCFrame = obj.CFrame
-            elseif obj:IsA("Tool") and obj:FindFirstChild("Handle") then targetCFrame = obj.Handle.CFrame
-            else local part = obj:FindFirstChildWhichIsA("BasePart", true); if part then targetCFrame = part.CFrame end end
-            if targetCFrame then
-                rootPart.CFrame = targetCFrame + Vector3.new(0, 1, 0)
+            local tcf = nil
+            if obj:IsA("Model") and obj.PrimaryPart then tcf = obj.PrimaryPart.CFrame
+            elseif obj:IsA("BasePart") then tcf = obj.CFrame
+            elseif obj:IsA("Tool") and obj:FindFirstChild("Handle") then tcf = obj.Handle.CFrame
+            else local p = obj:FindFirstChildWhichIsA("BasePart", true); if p then tcf = p.CFrame end end
+            if tcf then
+                char.HumanoidRootPart.CFrame = tcf + Vector3.new(0, 1, 0)
                 task.wait(0.25)
                 local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
                 if prompt and fireproximityprompt then fireproximityprompt(prompt) end
@@ -653,7 +615,8 @@ end
 local function GetNextVomitTarget_All()
     local candidates = {}
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+            and not isWhitelisted(p) and not isFriend(p) then
             table.insert(candidates, p)
         end
     end
@@ -684,23 +647,15 @@ local function VomitStickyLoop(targetPlayer, duration)
         local targetHRP = targetPlayer.Character.HumanoidRootPart
         local targetCF = targetHRP.CFrame
         local targetPos = targetHRP.Position
-        if targetHum and (targetHum.Jump or targetHum:GetState() == Enum.HumanoidStateType.Jumping) then
-            myHum.Jump = true
-        end
+        if targetHum and (targetHum.Jump or targetHum:GetState() == Enum.HumanoidStateType.Jumping) then myHum.Jump = true end
         if Settings.VomitLagTP and targetHRP.Velocity.Magnitude > 1 then
-            local pv = targetHRP.Velocity * 0.25
-            targetCF = targetCF + pv
-            targetPos = targetPos + pv
+            local pv = targetHRP.Velocity * 0.25; targetCF = targetCF + pv; targetPos = targetPos + pv
         end
-        if Settings.VomitActionMode == "Normal" then
-            rootPart.CFrame = targetCF
-        elseif Settings.VomitActionMode == "Behind" then
-            rootPart.CFrame = targetCF * CFrame.new(0, 0, 3)
-        elseif Settings.VomitActionMode == "Front" then
-            rootPart.CFrame = targetCF * CFrame.new(0, 0, -3) * CFrame.Angles(0, math.rad(180), 0)
+        if Settings.VomitActionMode == "Normal" then rootPart.CFrame = targetCF
+        elseif Settings.VomitActionMode == "Behind" then rootPart.CFrame = targetCF * CFrame.new(0, 0, 3)
+        elseif Settings.VomitActionMode == "Front" then rootPart.CFrame = targetCF * CFrame.new(0, 0, -3) * CFrame.Angles(0, math.rad(180), 0)
         elseif Settings.VomitActionMode == "Rotation" then
-            local radius = 4
-            local angle = tick() * Settings.VomitRotateSpeed
+            local radius = 4; local angle = tick() * Settings.VomitRotateSpeed
             local offset = Vector3.new(math.sin(angle) * radius, 0, math.cos(angle) * radius)
             rootPart.CFrame = CFrame.lookAt(targetPos + offset, targetPos)
         elseif Settings.VomitActionMode == "Feet" then
@@ -716,55 +671,64 @@ end
 local function VomitStartLoop()
     while vomitRunning do
         local char = LocalPlayer.Character
-        if not char or not char.Parent or not char:FindFirstChild("Humanoid") or char.Humanoid.Health <= 0 then
-            task.wait(1)
-            continue
+        if char and char.Parent and char:FindFirstChild("Humanoid") and char.Humanoid.Health > 0 then
+            local hum = char.Humanoid
+            local rootPart = char:FindFirstChild("HumanoidRootPart")
+            if rootPart then
+                SetCameraSubject(hum)
+                Teleport(CFrame.new(Settings.HealPos))
+                task.wait(0.2)
+                while hum.Health < hum.MaxHealth and vomitRunning and hum.Health > 0 do
+                    rootPart.CFrame = CFrame.new(Settings.HealPos)
+                    task.wait(0.1)
+                end
+                if hum.Health > 0 and vomitRunning then
+                    local eatSuccess = FindAndEatSandwich()
+                    if eatSuccess and vomitRunning then
+                        task.wait(Settings.VomitAfterEat)
+                        if hum.Health > 0 and vomitRunning then
+                            local targetPlayer = nil
+                            if Settings.VomitLoopList then targetPlayer = GetNextVomitTarget_List()
+                            elseif Settings.VomitLoopAll then targetPlayer = GetNextVomitTarget_All() end
+                            if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                                Teleport(targetPlayer.Character.HumanoidRootPart.CFrame)
+                                VomitStickyLoop(targetPlayer, Settings.VomitStayTime)
+                            end
+                        end
+                    end
+                end
+            end
         end
-        local hum = char.Humanoid
-        local rootPart = char:FindFirstChild("HumanoidRootPart")
-        if not rootPart then task.wait(0.5); continue end
-        SetCameraSubject(hum)
-        Teleport(CFrame.new(Settings.HealPos))
-        task.wait(0.2)
-        while hum.Health < hum.MaxHealth and vomitRunning and hum.Health > 0 do
-            rootPart.CFrame = CFrame.new(Settings.HealPos)
-            task.wait(0.1)
-        end
-        if hum.Health <= 0 or not vomitRunning then continue end
-        local eatSuccess = FindAndEatSandwich()
-        if not eatSuccess then task.wait(0.5); continue end
-        if vomitRunning then task.wait(Settings.VomitAfterEat) end
-        if hum.Health <= 0 or not vomitRunning then continue end
-        local targetPlayer = nil
-        if Settings.VomitLoopList then targetPlayer = GetNextVomitTarget_List()
-        elseif Settings.VomitLoopAll then targetPlayer = GetNextVomitTarget_All() end
-        if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
-            Teleport(targetPlayer.Character.HumanoidRootPart.CFrame)
-            VomitStickyLoop(targetPlayer, Settings.VomitStayTime)
-        else
-            task.wait(1)
-        end
-        task.wait(0.1)
+        task.wait(0.5)
     end
 end
 
 updateAllPlayers()
 Players.PlayerAdded:Connect(function(ply)
-    if ply ~= LocalPlayer then table.insert(allPlayers, ply) end
+    if ply ~= LocalPlayer then
+        table.insert(allPlayers, ply)
+        local names = getPlayerNames()
+        if whitelistDropdown then whitelistDropdown:SetValues(names) end
+        if targetDropdown then targetDropdown:SetValues(names) end
+        if friendDropdown then friendDropdown:SetValues(names) end
+    end
 end)
 Players.PlayerRemoving:Connect(function(ply)
-    for i, p in ipairs(allPlayers) do
-        if p == ply then table.remove(allPlayers, i); break end
-    end
-    if currentTarget == ply then currentTarget = nil end
+    for i, p in ipairs(allPlayers) do if p == ply then table.remove(allPlayers, i); break end end
+    for i, t in ipairs(currentTargets) do if t == ply then table.remove(currentTargets, i); break end end
+    vomitTrackingHistory[ply.UserId] = nil
+    local names = getPlayerNames()
+    if whitelistDropdown then whitelistDropdown:SetValues(names) end
+    if targetDropdown then targetDropdown:SetValues(names) end
+    if friendDropdown then friendDropdown:SetValues(names) end
 end)
 
-loadstring(game:HttpGet("https://raw.githubusercontent.com/sddswwdssc/ok/refs/heads/main/GUI"))()
+local repo = "https://raw.githubusercontent.com/ATLASTEAM01/Obsidian/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
 
-local Options = Library.Options
-local Toggles = Library.Toggles
-
-local Window = Library:CreateWindow({ Title = "血腥游乐场", Footer = "V1", Center = true, AutoShow = true })
+local Window = Library:CreateWindow({ Title = "血腥游乐场", Footer = "V2", Center = true, AutoShow = true })
 
 local Tabs = {
     Main = Window:AddTab("主页", "swords"),
@@ -777,7 +741,10 @@ local Tabs = {
 local MainLeft = Tabs.Main:AddLeftGroupbox("光环")
 MainLeft:AddToggle("KnifeAuraToggle", { Text = "刀光环", Default = false }):OnChanged(function(v) Settings.KnifeAura = v end)
 MainLeft:AddToggle("AxeAuraToggle", { Text = "斧光环", Default = false }):OnChanged(function(v) Settings.AxeAura = v end)
-MainLeft:AddToggle("DefenseToggle", { Text = "循环防御", Default = false }):OnChanged(function(v) Settings.Defense = v end)
+MainLeft:AddToggle("DefenseToggle", { Text = "持续防御(长按R)", Default = false }):OnChanged(function(v)
+    Settings.Defense = v
+    if v then startDefense() else stopDefense() end
+end)
 MainLeft:AddSlider("RangeSlider", { Text = "光环范围", Default = 50, Min = 10, Max = 500, Rounding = 0, Suffix = " studs" }):OnChanged(function(v) Settings.AuraRange = v end)
 MainLeft:AddSlider("IntervalSlider", { Text = "攻击间隔", Default = 0.05, Min = 0.01, Max = 1, Rounding = 3, Suffix = "s" }):OnChanged(function(v) Settings.AttackInterval = v end)
 
@@ -810,35 +777,28 @@ VomitLeft:AddSlider("VomitRotateSlider", { Text = "旋转速度", Default = 10, 
 
 local VomitRight = Tabs.Vomit:AddRightGroupbox("动作模式")
 local vomitActionBtn = VomitRight:AddButton("当前: Normal", function()
-    if Settings.VomitActionMode == "Normal" then Settings.VomitActionMode = "Behind"
-    elseif Settings.VomitActionMode == "Behind" then Settings.VomitActionMode = "Front"
-    elseif Settings.VomitActionMode == "Front" then Settings.VomitActionMode = "Rotation"
-    elseif Settings.VomitActionMode == "Rotation" then Settings.VomitActionMode = "Feet"
-    elseif Settings.VomitActionMode == "Feet" then Settings.VomitActionMode = "Normal" end
+    local modes = {"Normal","Behind","Front","Rotation","Feet"}
+    for i, m in ipairs(modes) do if Settings.VomitActionMode == m then Settings.VomitActionMode = modes[i % 5 + 1]; break end end
     vomitActionBtn.Text = "当前: " .. Settings.VomitActionMode
 end)
-
 VomitRight:AddButton("开始呕吐循环", function()
-    vomitRunning = true
-    vomitTrackingHistory = {}
-    vomitAllIndex = 1
-    vomitListIndex = 1
+    vomitRunning = true; vomitTrackingHistory = {}; vomitAllIndex = 1; vomitListIndex = 1
     task.spawn(VomitStartLoop)
 end)
-
 VomitRight:AddButton("停止呕吐循环", function()
     vomitRunning = false
-    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-        SetCameraSubject(LocalPlayer.Character.Humanoid)
-    end
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then SetCameraSubject(LocalPlayer.Character.Humanoid) end
     Teleport(CFrame.new(Settings.HealPos))
 end)
 
 local TargetLeft = Tabs.Target:AddLeftGroupbox("名单")
-TargetLeft:AddInput("TargetInput", { Text = "目标名单", Default = "", PlaceholderText = "名字1,名字2" }):OnChanged(function(v) Settings.TargetNames = v; updateTargets(); currentTarget = nil end)
-TargetLeft:AddInput("WhitelistInput", { Text = "白名单", Default = "", PlaceholderText = "名字1,名字2" }):OnChanged(function(v) Settings.Whitelist = v; updateWhitelist(); currentTarget = nil end)
-TargetLeft:AddInput("FriendInput", { Text = "好友名单(免锁)", Default = "", PlaceholderText = "名字1,名字2" }):OnChanged(function(v) Settings.FriendList = v; updateFriends(); currentTarget = nil end)
-TargetLeft:AddToggle("AttackAllToggle", { Text = "攻击全服", Default = false }):OnChanged(function(v) Settings.AttackAll = v; currentTarget = nil end)
+local whitelistDropdown = TargetLeft:AddDropdown("WhitelistDropdown", { Text = "白名单", Default = {}, Values = getPlayerNames(), Multi = true })
+whitelistDropdown:OnChanged(function(v) Settings.WhitelistNames = v; currentTargets = {} end)
+local targetDropdown = TargetLeft:AddDropdown("TargetDropdown", { Text = "锁人目标", Default = {}, Values = getPlayerNames(), Multi = true })
+targetDropdown:OnChanged(function(v) Settings.TargetNames = v; currentTargets = {} end)
+local friendDropdown = TargetLeft:AddDropdown("FriendDropdown", { Text = "好友免锁", Default = {}, Values = getPlayerNames(), Multi = true })
+friendDropdown:OnChanged(function(v) Settings.FriendNames = v; currentTargets = {} end)
+TargetLeft:AddToggle("AttackAllToggle", { Text = "攻击全服", Default = false }):OnChanged(function(v) Settings.AttackAll = v; currentTargets = {} end)
 
 ThemeManager:SetLibrary(Library)
 SaveManager:SetLibrary(Library)
@@ -849,7 +809,4 @@ SaveManager:BuildConfigSection(Tabs["UI Settings"])
 ThemeManager:ApplyToTab(Tabs["UI Settings"])
 SaveManager:LoadAutoloadConfig()
 
-updateTargets()
-updateWhitelist()
-updateFriends()
 ParseVomitMultiList(Settings.VomitMultiList)

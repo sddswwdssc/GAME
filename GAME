@@ -14,7 +14,6 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Stats = game:GetService("Stats")
-local Debris = game:GetService("Debris")
 local UserInputService = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 
@@ -25,24 +24,22 @@ local Settings = {
     AttackType = "Swing",
     Teleport = false,
     TPMode = "Instant",
-    Prediction = true,
+    Prediction = false,
     ActionMode = "Front",
     RotateSpeed = 50,
     AttackAll = false,
     SmoothSpeed = 15,
     AntiShake = false,
     AntiLag = false,
-    AutoKnife = true,
-    AutoAxe = true,
+    AutoKnife = false,
+    AutoAxe = false,
     PickupDepth = 4.5,
     Defense = false,
     AxeAura = false,
-    TargetNames = {},
-    WhitelistNames = {},
-    FriendNames = {},
+    TargetNames = "",
+    WhitelistNames = "",
     PlatformSpeed = 9999,
-    FallProtect = true,
-    AutoHeal = true,
+    AutoHeal = false,
     HealPos = Vector3.new(731, 2384, 247),
     VomitLoopAll = false,
     VomitLoopList = false,
@@ -77,23 +74,15 @@ local function startDefense()
     if defending then return end
     defending = true
     defenseThread = task.spawn(function()
-        while defending do
-            pcall(function()
-                VirtualInputManager:SendKeyEvent(true, "R", false, game)
-            end)
-            task.wait()
-        end
+        pcall(function() VirtualInputManager:SendKeyEvent(true, "R", false, game) end)
+        while defending do task.wait(0.5) end
+        pcall(function() VirtualInputManager:SendKeyEvent(false, "R", false, game) end)
     end)
 end
 
 local function stopDefense()
     defending = false
-    if defenseThread then
-        pcall(function()
-            VirtualInputManager:SendKeyEvent(false, "R", false, game)
-        end)
-        defenseThread = nil
-    end
+    if defenseThread then defenseThread = nil end
 end
 
 local function getPing()
@@ -116,30 +105,43 @@ local function getPlayerNames()
     return names
 end
 
-local function isFriend(ply)
+local function isWhitelisted(ply)
     if not ply then return false end
-    if ply:IsFriendsWith(LocalPlayer.UserId) then return true end
-    for _, name in ipairs(Settings.FriendNames) do
+    if Settings.WhitelistNames == "" then return false end
+    for _, name in ipairs(parseList(Settings.WhitelistNames)) do
         if ply.Name == name or ply.DisplayName == name then return true end
     end
     return false
 end
 
-local function isWhitelisted(ply)
-    if not ply then return false end
-    if isFriend(ply) then return true end
-    for _, name in ipairs(Settings.WhitelistNames) do
-        if ply.Name == name or ply.DisplayName == name then return true end
+local function parseList(str)
+    local list = {}
+    if not str or str == "" then return list end
+    for name in string.gmatch(str, "([^,，]+)") do
+        local clean = name:gsub("%s+", "")
+        if clean ~= "" then table.insert(list, clean) end
     end
-    return false
+    return list
+end
+
+local function findPlayerByExactName(name)
+    for _, ply in ipairs(Players:GetPlayers()) do
+        if ply ~= LocalPlayer then
+            if ply.Name == name or ply.DisplayName == name then
+                return ply
+            end
+        end
+    end
+    return nil
 end
 
 local function isTarget(ply)
     if not ply or ply == LocalPlayer then return false end
     if isWhitelisted(ply) then return false end
     if Settings.AttackAll then return true end
-    if #Settings.TargetNames == 0 then return false end
-    for _, name in ipairs(Settings.TargetNames) do
+    if Settings.TargetNames == "" then return false end
+    local targetList = parseList(Settings.TargetNames)
+    for _, name in ipairs(targetList) do
         if ply.Name == name or ply.DisplayName == name then return true end
     end
     return false
@@ -148,7 +150,7 @@ end
 local function getValidTargets()
     local valid = {}
     for _, ply in ipairs(allPlayers) do
-        if isTarget(ply) and not isWhitelisted(ply) then
+        if isTarget(ply) then
             local char = ply.Character
             local root = char and char:FindFirstChild("HumanoidRootPart")
             local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -156,38 +158,6 @@ local function getValidTargets()
         end
     end
     return valid
-end
-
-local function targetValid(ply)
-    if not ply or not ply.Parent then return false end
-    if isWhitelisted(ply) then return false end
-    if not isTarget(ply) then return false end
-    local char = ply.Character
-    if not char then return false end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not root or not hum or hum.Health <= 0 then return false end
-    return true
-end
-
-local function cleanTargetList()
-    local cleaned = {}
-    for _, t in ipairs(currentTargets) do
-        if targetValid(t) then table.insert(cleaned, t) end
-    end
-    currentTargets = cleaned
-end
-
-local function getNextTarget()
-    local targets = getValidTargets()
-    if #targets == 0 then return nil end
-    cleanTargetList()
-    if #currentTargets > 0 then return currentTargets[1] end
-    rotIndex = rotIndex + 1
-    if rotIndex > #targets then rotIndex = 1 end
-    local newTarget = targets[rotIndex]
-    table.insert(currentTargets, newTarget)
-    return newTarget
 end
 
 local function clearCameraProxy()
@@ -346,10 +316,7 @@ local function getClosestForAura()
         end
     end
     for _, ply in ipairs(allPlayers) do
-        if ply.Character then check(ply.Character) end
-    end
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("Model") and not Players:GetPlayerFromCharacter(obj) then check(obj) end
+        if ply.Character and isTarget(ply) then check(ply.Character) end
     end
     return closest
 end
@@ -398,10 +365,7 @@ task.spawn(function()
                     end
                 end
                 for _, ply in ipairs(allPlayers) do
-                    if ply.Character then check(ply.Character) end
-                end
-                for _, obj in ipairs(Workspace:GetDescendants()) do
-                    if obj:IsA("Model") and not Players:GetPlayerFromCharacter(obj) then check(obj) end
+                    if ply.Character and isTarget(ply) then check(ply.Character) end
                 end
                 if closest then
                     local axe = char:FindFirstChild("Fire Axe")
@@ -422,37 +386,74 @@ task.spawn(function()
     end
 end)
 
-local function doHeal(root)
-    healing = true
-    lastLockPos = root.CFrame
-    root.CFrame = CFrame.new(Settings.HealPos)
-    task.wait()
-    root.CFrame = lastLockPos
-    root.Velocity = Vector3.new(0, 0, 0)
-    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-    healing = false
+local function autoHealCheck(char, root, hum)
+    if Settings.AutoHeal and hum.Health < 100 then
+        healing = true
+        lastLockPos = root.CFrame
+        root.CFrame = CFrame.new(Settings.HealPos)
+        task.wait()
+        root.CFrame = lastLockPos
+        root.Velocity = Vector3.new(0, 0, 0)
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        healing = false
+        return true
+    end
+    return false
 end
 
 local function tpLoop(dt)
-    if not Settings.Teleport then resetCamera(); destroyPlatform(); return end
+    if not Settings.Teleport then
+        resetCamera()
+        destroyPlatform()
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if root and hum and hum.Health > 0 then
+            autoHealCheck(char, root, hum)
+        end
+        return
+    end
+
     if fetchingKnife or fetchingAxe or healing then return end
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not root or not hum then return end
     if hum.Health <= 0 then return end
-    if Settings.AutoHeal and hum.Health < 100 then doHeal(root); return end
+
+    if autoHealCheck(char, root, hum) then return end
+
     if Settings.AntiLag then
         local now = tick()
         if now - lastTPTime < 0.08 then return end
         lastTPTime = now
     end
+
     pcall(function()
         if Settings.AutoKnife and not hasKnife() then local dropped = findKnife(); if dropped then resetCamera(); fetchKnife(); return end end
         if Settings.AutoAxe and not hasAxe() then local dropped = findAxe(); if dropped then resetCamera(); fetchAxe(); return end end
-        cleanTargetList()
-        if #currentTargets == 0 then local newTarget = getNextTarget(); if newTarget then currentTargets = {newTarget} end end
+        
+        -- 清理死目标
+        local cleaned = {}
+        for _, t in ipairs(currentTargets) do
+            local tChar = t.Character
+            local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
+            local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+            if tHum and tRoot and tHum.Health > 0 then
+                table.insert(cleaned, t)
+            end
+        end
+        currentTargets = cleaned
+        
+        if #currentTargets == 0 and (Settings.AttackAll or Settings.TargetNames ~= "") then
+            local targets = getValidTargets()
+            for _, ply in ipairs(targets) do
+                table.insert(currentTargets, ply)
+            end
+        end
+        
         local currentTarget = #currentTargets > 0 and currentTargets[1] or nil
+        
         if not currentTarget then
             local platform = getPlatform()
             local timer = tick() * (Settings.PlatformSpeed / 200)
@@ -465,6 +466,7 @@ local function tpLoop(dt)
             resetCamera()
             return
         end
+        
         local tChar = currentTarget.Character
         local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
         local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
@@ -513,39 +515,22 @@ local function tpLoop(dt)
             if Settings.ActionMode == "UnderFoot" then return CFrame.new(pos) * CFrame.Angles(math.rad(90), 0, 0)
             else return CFrame.new(pos, lookAt) end
         end
-        root.CFrame = getCFrame(dest)
-        root.Velocity = Vector3.new(0, 0, 0)
-        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        if Settings.TPMode == "Smooth" then
+        if Settings.TPMode == "Instant" then
+            root.CFrame = getCFrame(dest)
+        else
             local curPos = root.Position
             local dir = (dest - curPos)
             if dir.Magnitude > 1 then
                 local stepSize = math.min(Settings.SmoothSpeed * (dt * 60), dir.Magnitude)
                 if dir.Magnitude > 100 then stepSize = dir.Magnitude * 0.5 end
                 root.CFrame = getCFrame(curPos + dir.Unit * stepSize)
+            else
+                root.CFrame = getCFrame(dest)
             end
         end
-        if Settings.FallProtect then
-            local floor = Instance.new("Part")
-            floor.Size = Vector3.new(4, 0.2, 4)
-            floor.CFrame = CFrame.new(root.Position - Vector3.new(0, 3, 0))
-            floor.Anchored = true; floor.Transparency = 1; floor.CanCollide = true
-            floor.Parent = Workspace
-            Debris:AddItem(floor, 0.15)
-        end
+        root.Velocity = Vector3.new(0, 0, 0)
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
     end)
-end
-
-local function toggleTP(state)
-    Settings.Teleport = state
-    if state then
-        if not tpConnection then tpConnection = RunService.Heartbeat:Connect(tpLoop) end
-    else
-        if tpConnection then tpConnection:Disconnect(); tpConnection = nil end
-        currentTargets = {}
-        destroyPlatform()
-        resetCamera()
-    end
 end
 
 local function Teleport(targetCFrame)
@@ -616,7 +601,7 @@ local function GetNextVomitTarget_All()
     local candidates = {}
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-            and not isWhitelisted(p) and not isFriend(p) then
+            and not isWhitelisted(p) then
             table.insert(candidates, p)
         end
     end
@@ -707,33 +692,36 @@ updateAllPlayers()
 Players.PlayerAdded:Connect(function(ply)
     if ply ~= LocalPlayer then
         table.insert(allPlayers, ply)
-        local names = getPlayerNames()
-        if whitelistDropdown then whitelistDropdown:SetValues(names) end
-        if targetDropdown then targetDropdown:SetValues(names) end
-        if friendDropdown then friendDropdown:SetValues(names) end
     end
 end)
 Players.PlayerRemoving:Connect(function(ply)
     for i, p in ipairs(allPlayers) do if p == ply then table.remove(allPlayers, i); break end end
     for i, t in ipairs(currentTargets) do if t == ply then table.remove(currentTargets, i); break end end
     vomitTrackingHistory[ply.UserId] = nil
-    local names = getPlayerNames()
-    if whitelistDropdown then whitelistDropdown:SetValues(names) end
-    if targetDropdown then targetDropdown:SetValues(names) end
-    if friendDropdown then friendDropdown:SetValues(names) end
 end)
 
-local repo = "https://raw.githubusercontent.com/ATLASTEAM01/Obsidian/main/"
-local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
-local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
-local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+local function loadFromURL(url)
+    local success, result = pcall(function() return game:HttpGet(url) end)
+    if success and result then local f = loadstring(result); if f then return f() end end
+    return nil
+end
 
-local Window = Library:CreateWindow({ Title = "血腥游乐场", Footer = "V2", Center = true, AutoShow = true })
+local Library = loadFromURL("https://raw.githubusercontent.com/ATLASTEAM01/Obsidian/main/Library.lua")
+if not Library then Library = loadFromURL("https://ghproxy.com/https://raw.githubusercontent.com/ATLASTEAM01/Obsidian/main/Library.lua") end
+if not Library then return end
+
+local ThemeManager = loadFromURL("https://raw.githubusercontent.com/ATLASTEAM01/Obsidian/main/addons/ThemeManager.lua")
+if not ThemeManager then ThemeManager = loadFromURL("https://ghproxy.com/https://raw.githubusercontent.com/ATLASTEAM01/Obsidian/main/addons/ThemeManager.lua") end
+
+local SaveManager = loadFromURL("https://raw.githubusercontent.com/ATLASTEAM01/Obsidian/main/addons/SaveManager.lua")
+if not SaveManager then SaveManager = loadFromURL("https://ghproxy.com/https://raw.githubusercontent.com/ATLASTEAM01/Obsidian/main/addons/SaveManager.lua") end
+
+local Window = Library:CreateWindow({ Title = "血腥游乐场", Footer = "V1", Center = true, AutoShow = true })
 
 local Tabs = {
     Main = Window:AddTab("主页", "swords"),
-    Vomit = Window:AddTab("呕吐", "utensils"),
     Target = Window:AddTab("目标", "users"),
+    Vomit = Window:AddTab("呕吐", "utensils"),
     SettingsTab = Window:AddTab("设置", "cog"),
     ["UI Settings"] = Window:AddTab("UI", "palette"),
 }
@@ -749,22 +737,77 @@ MainLeft:AddSlider("RangeSlider", { Text = "光环范围", Default = 50, Min = 1
 MainLeft:AddSlider("IntervalSlider", { Text = "攻击间隔", Default = 0.05, Min = 0.01, Max = 1, Rounding = 3, Suffix = "s" }):OnChanged(function(v) Settings.AttackInterval = v end)
 
 local MainRight = Tabs.Main:AddRightGroupbox("传送")
-MainRight:AddToggle("TeleportToggle", { Text = "传送追杀", Default = false }):OnChanged(function(v) toggleTP(v) end)
 MainRight:AddDropdown("TPModeDropdown", { Text = "传送模式", Default = "Instant", Values = {"Instant", "Smooth"} }):OnChanged(function(v) Settings.TPMode = v end)
 MainRight:AddDropdown("ActionDropdown", { Text = "动作模式", Default = "Front", Values = {"Front", "Behind", "Rotate", "UnderFoot"} }):OnChanged(function(v) Settings.ActionMode = v end)
-MainRight:AddToggle("PredictionToggle", { Text = "动态预测", Default = true }):OnChanged(function(v) Settings.Prediction = v end)
+MainRight:AddToggle("PredictionToggle", { Text = "动态预测", Default = false }):OnChanged(function(v) Settings.Prediction = v end)
 MainRight:AddToggle("AntiShakeToggle", { Text = "防抖", Default = false }):OnChanged(function(v) Settings.AntiShake = v; if not v then clearCameraProxy() end end)
 MainRight:AddToggle("AntiLagToggle", { Text = "防延迟", Default = false }):OnChanged(function(v) Settings.AntiLag = v end)
-MainRight:AddToggle("FallProtectToggle", { Text = "防掉落", Default = true }):OnChanged(function(v) Settings.FallProtect = v end)
-MainRight:AddToggle("AutoHealToggle", { Text = "自动回血", Default = true }):OnChanged(function(v) Settings.AutoHeal = v end)
+MainRight:AddToggle("AutoHealToggle", { Text = "自动回血", Default = false }):OnChanged(function(v) Settings.AutoHeal = v end)
 MainRight:AddSlider("SmoothSlider", { Text = "平滑速度", Default = 15, Min = 1, Max = 50, Rounding = 0 }):OnChanged(function(v) Settings.SmoothSpeed = v end)
 MainRight:AddSlider("RotateSlider", { Text = "旋转速度", Default = 50, Min = 1, Max = 200, Rounding = 0 }):OnChanged(function(v) Settings.RotateSpeed = v end)
 
 local MainBottom = Tabs.Main:AddRightGroupbox("拾取")
-MainBottom:AddToggle("AutoKnifeToggle", { Text = "自动捡刀", Default = true }):OnChanged(function(v) Settings.AutoKnife = v end)
-MainBottom:AddToggle("AutoAxeToggle", { Text = "自动捡斧", Default = true }):OnChanged(function(v) Settings.AutoAxe = v end)
+MainBottom:AddToggle("AutoKnifeToggle", { Text = "自动捡刀", Default = false }):OnChanged(function(v) Settings.AutoKnife = v end)
+MainBottom:AddToggle("AutoAxeToggle", { Text = "自动捡斧", Default = false }):OnChanged(function(v) Settings.AutoAxe = v end)
 MainBottom:AddSlider("DepthSlider", { Text = "下潜深度", Default = 4.5, Min = 1, Max = 20, Rounding = 1 }):OnChanged(function(v) Settings.PickupDepth = v end)
 MainBottom:AddSlider("PlatformSlider", { Text = "底板速度", Default = 9999, Min = 0, Max = 9999, Rounding = 0 }):OnChanged(function(v) Settings.PlatformSpeed = v end)
+
+local TargetLeft = Tabs.Target:AddLeftGroupbox("名单与追杀")
+local TeleportToggle = TargetLeft:AddToggle("TeleportToggle", { Text = "传送追杀", Default = false }):OnChanged(function(v)
+    if v then
+        if Settings.TargetNames == "" and not Settings.AttackAll then
+            pcall(function() Library:Notify("请先输入目标名字或开启攻击全服") end)
+            TeleportToggle:SetValue(false)
+            return
+        end
+        Settings.Teleport = true
+        if tpConnection then tpConnection:Disconnect() end
+        tpConnection = RunService.Heartbeat:Connect(tpLoop)
+    else
+        Settings.Teleport = false
+        if tpConnection then tpConnection:Disconnect(); tpConnection = nil end
+    end
+end)
+local AttackAllToggle = TargetLeft:AddToggle("AttackAllToggle", { Text = "攻击全服", Default = false }):OnChanged(function(v)
+    Settings.AttackAll = v
+    currentTargets = {}
+    if v then
+        Settings.Teleport = true
+        if tpConnection then tpConnection:Disconnect() end
+        tpConnection = RunService.Heartbeat:Connect(tpLoop)
+    else
+        if Settings.TargetNames == "" then
+            Settings.Teleport = false
+            if tpConnection then tpConnection:Disconnect(); tpConnection = nil end
+        end
+    end
+end)
+
+TargetLeft:AddInput("WhitelistInput", { Text = "白名单", Default = "", PlaceholderText = "用户名,逗号分隔" }):OnChanged(function(v) Settings.WhitelistNames = v end)
+TargetLeft:AddInput("TargetInput", { Text = "锁人目标", Default = "", PlaceholderText = "你想锁的人用户名多选用,隔开,我会更新的" }):OnChanged(function(v)
+    Settings.TargetNames = v
+    currentTargets = {}
+    if v ~= "" then
+        local ply = findPlayerByExactName(v)
+        if ply then
+            if isWhitelisted(ply) then
+                pcall(function() Library:Notify(v .. " 在白名单中") end)
+            else
+                table.insert(currentTargets, ply)
+                Settings.Teleport = true
+                if tpConnection then tpConnection:Disconnect() end
+                tpConnection = RunService.Heartbeat:Connect(tpLoop)
+            end
+        else
+            pcall(function() Library:Notify("此服务器没有玩家: " .. v) end)
+        end
+    else
+        if not Settings.AttackAll then
+            Settings.Teleport = false
+            if tpConnection then tpConnection:Disconnect(); tpConnection = nil end
+        end
+    end
+end)
 
 local VomitLeft = Tabs.Vomit:AddLeftGroupbox("呕吐控制")
 VomitLeft:AddToggle("VomitLoopAllToggle", { Text = "循环所有人", Default = false }):OnChanged(function(v) Settings.VomitLoopAll = v end)
@@ -791,22 +834,15 @@ VomitRight:AddButton("停止呕吐循环", function()
     Teleport(CFrame.new(Settings.HealPos))
 end)
 
-local TargetLeft = Tabs.Target:AddLeftGroupbox("名单")
-local whitelistDropdown = TargetLeft:AddDropdown("WhitelistDropdown", { Text = "白名单", Default = {}, Values = getPlayerNames(), Multi = true })
-whitelistDropdown:OnChanged(function(v) Settings.WhitelistNames = v; currentTargets = {} end)
-local targetDropdown = TargetLeft:AddDropdown("TargetDropdown", { Text = "锁人目标", Default = {}, Values = getPlayerNames(), Multi = true })
-targetDropdown:OnChanged(function(v) Settings.TargetNames = v; currentTargets = {} end)
-local friendDropdown = TargetLeft:AddDropdown("FriendDropdown", { Text = "好友免锁", Default = {}, Values = getPlayerNames(), Multi = true })
-friendDropdown:OnChanged(function(v) Settings.FriendNames = v; currentTargets = {} end)
-TargetLeft:AddToggle("AttackAllToggle", { Text = "攻击全服", Default = false }):OnChanged(function(v) Settings.AttackAll = v; currentTargets = {} end)
-
-ThemeManager:SetLibrary(Library)
-SaveManager:SetLibrary(Library)
-SaveManager:IgnoreThemeSettings()
-SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
-SaveManager:SetFolder("AuraControl/Configs")
-SaveManager:BuildConfigSection(Tabs["UI Settings"])
-ThemeManager:ApplyToTab(Tabs["UI Settings"])
-SaveManager:LoadAutoloadConfig()
+if ThemeManager and SaveManager then
+    ThemeManager:SetLibrary(Library)
+    SaveManager:SetLibrary(Library)
+    SaveManager:IgnoreThemeSettings()
+    SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+    SaveManager:SetFolder("AuraControl/Configs")
+    SaveManager:BuildConfigSection(Tabs["UI Settings"])
+    ThemeManager:ApplyToTab(Tabs["UI Settings"])
+    SaveManager:LoadAutoloadConfig()
+end
 
 ParseVomitMultiList(Settings.VomitMultiList)
